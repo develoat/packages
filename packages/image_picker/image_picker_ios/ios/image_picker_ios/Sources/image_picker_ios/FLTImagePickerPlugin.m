@@ -27,6 +27,40 @@
 }
 @end
 
+/**
+ * a callback function what the PickerViewController remove from window.
+ */
+typedef void (^FLTImagePickerRemoveCallback)(void);
+
+/**
+ * Add the view to the PickerViewController's view, observing its window to observe the window of PickerViewController.
+ * This is to prevent PickerViewController from being removed from the screen without receiving callback information under other circumstances,
+ * such as being interactively dismissed before PickerViewController has fully popped up.
+ */
+@interface FLTImagePickerRemoveObserverView : UIView
+
+@property(nonatomic, copy, nonnull) FLTImagePickerRemoveCallback removeCallback;
+
+-(instancetype)initWithRemoveCallback:(FLTImagePickerRemoveCallback)callback;
+
+@end
+
+@implementation FLTImagePickerRemoveObserverView
+
+- (instancetype)initWithRemoveCallback:(FLTImagePickerRemoveCallback)callback{
+  if (self = [super init]) {
+    self.removeCallback = callback;
+  }
+  return self;
+}
+- (void)didMoveToWindow {
+  if (!self.window) {
+    [self removeFromSuperview];
+    [[NSOperationQueue mainQueue]addOperationWithBlock:self.removeCallback];
+  }
+}
+@end
+
 #pragma mark -
 
 @interface FLTImagePickerPlugin ()
@@ -112,6 +146,8 @@ typedef NS_ENUM(NSInteger, ImagePickerClassType) { UIImagePickerClassType, PHPic
   pickerViewController.delegate = self;
   pickerViewController.presentationController.delegate = self;
   self.callContext = context;
+  //追加
+  [self bindRemoveObserver:pickerViewController context:context pathList:nil];
 
   if (context.requestFullMetadata) {
     [self checkPhotoAuthorizationWithPHPicker:pickerViewController];
@@ -132,6 +168,8 @@ typedef NS_ENUM(NSInteger, ImagePickerClassType) { UIImagePickerClassType, PHPic
     imagePickerController.mediaTypes = @[ (NSString *)kUTTypeImage ];
   }
   self.callContext = context;
+  //追加
+  [self bindRemoveObserver:imagePickerController context:context pathList:nil];
 
   switch (source.type) {
     case FLTSourceTypeCamera:
@@ -152,6 +190,22 @@ typedef NS_ENUM(NSInteger, ImagePickerClassType) { UIImagePickerClassType, PHPic
       break;
   }
 }
+
+//写真選択画面削除通知
+- (void)bindRemoveObserver:(nonnull UIViewController *)controller
+                   context:(nonnull FLTImagePickerMethodCallContext *)context
+                   pathList:(nullable NSArray *)pathList {
+  FLTImagePickerRemoveObserverView *removeObserverView =
+    [[FLTImagePickerRemoveObserverView alloc]initWithRemoveCallback:^{
+      NSLog(@"読み込み画像%@",pathList);
+      if(self.callContext == context) {
+        NSLog(@"アニメーションが強制終了しました");
+        [self sendCallResultWithSavedPathList:nil];
+      }
+    }];
+  [controller.view addSubview:removeObserverView];
+}
+
 
 #pragma mark - FLTImagePickerApi
 
@@ -495,10 +549,24 @@ typedef NS_ENUM(NSInteger, ImagePickerClassType) { UIImagePickerClassType, PHPic
 
 - (void)picker:(PHPickerViewController *)picker
     didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14)) {
-  [picker dismissViewControllerAnimated:YES completion:nil];
+    // 透明なビューを作成
+    UIView *overlayView = [[UIView alloc] initWithFrame:picker.view.bounds];
+    //インジケーターを作成
+    UIActivityIndicatorView *activityIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
   if (results.count == 0) {
+    [picker dismissViewControllerAnimated:YES completion:nil];
     [self sendCallResultWithSavedPathList:nil];
     return;
+  } else {
+      overlayView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.25];
+      [picker.view addSubview:overlayView];
+      
+      activityIndicator.center = picker.view.center;
+      activityIndicator.color = [UIColor whiteColor];
+      [picker.view addSubview:activityIndicator];
+      [picker.view bringSubviewToFront: activityIndicator];
+      //アニメーション開始
+      [activityIndicator startAnimating];
   }
   __block NSOperationQueue *saveQueue = [[NSOperationQueue alloc] init];
   saveQueue.name = @"Flutter Save Image Queue";
@@ -516,6 +584,7 @@ typedef NS_ENUM(NSInteger, ImagePickerClassType) { UIImagePickerClassType, PHPic
   // This operation will be executed on the main queue after
   // all selected files have been saved.
   NSBlockOperation *sendListOperation = [NSBlockOperation blockOperationWithBlock:^{
+    [picker dismissViewControllerAnimated:YES completion:nil];
     if (saveError != nil) {
       [weakSelf sendCallResultWithError:saveError];
     } else {
@@ -523,6 +592,9 @@ typedef NS_ENUM(NSInteger, ImagePickerClassType) { UIImagePickerClassType, PHPic
     }
     // Retain queue until here.
     saveQueue = nil;
+    [overlayView removeFromSuperview];
+    [activityIndicator removeFromSuperview];
+    [self stopActivityIndicator:activityIndicator];
   }];
 
   [results enumerateObjectsUsingBlock:^(PHPickerResult *result, NSUInteger index, BOOL *stop) {
@@ -644,6 +716,10 @@ typedef NS_ENUM(NSInteger, ImagePickerClassType) { UIImagePickerClassType, PHPic
 - (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
   [picker dismissViewControllerAnimated:YES completion:nil];
   [self sendCallResultWithSavedPathList:nil];
+}
+
+- (void)stopActivityIndicator:(UIActivityIndicatorView *)view {
+    [view stopAnimating];
 }
 
 #pragma mark -
